@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>History — Process Monitor</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div style="padding: 18px; max-width: 1100px; margin: 0 auto">
+      <h2>History</h2>
+      <div
+        style="
+          display: flex;
+          gap: 12px;
+          align-items: center;
+          margin-bottom: 12px;
+        "
+      >
+        <select id="hostSel" class="select"></select>
+        <button id="loadBtn" class="small-btn">Load history</button>
+        <button
+          id="backBtn"
+          class="small-btn ghost"
+          onclick="location.href='index.html'"
+        >
+          Back
+        </button>
+      </div>
+
+      <div class="card" id="historyContainer">
+        <div id="historyList">No data</div>
+        <div id="snapshotDetail" style="margin-top: 12px"></div>
+      </div>
+    </div>
+
+    <script>
+      const API_BASE = "http://127.0.0.1:8000/api";
+      async function loadHosts() {
+        try {
+          const hosts = await fetch(`${API_BASE}/hosts/`).then((r) => r.json());
+          document.getElementById("hostSel").innerHTML = hosts
+            .map((h) => `<option value="${h}">${h}</option>`)
+            .join("");
+        } catch (e) {
+          console.error(e);
+        }
+      }
+      document.getElementById("loadBtn").addEventListener("click", async () => {
+        const host = document.getElementById("hostSel").value;
+        if (!host) return alert("pick host");
+        const r = await fetch(
+          `${API_BASE}/process-snapshots/list/?hostname=${encodeURIComponent(
+            host
+          )}&page_size=200`
+        );
+        const payload = await r.json();
+        const items = payload.results || payload;
+        document.getElementById("historyList").innerHTML = items
+          .map(
+            (i) =>
+              `<div style="display:flex;justify-content:space-between;padding:8px;border-bottom:1px solid #182027"><div>${new Date(
+                i.captured_at
+              ).toLocaleString()}</div><div><button class="small-btn" data-id="${
+                i.snapshot_id
+              }">View</button></div></div>`
+          )
+          .join("");
+        document.querySelectorAll("#historyList button[data-id]").forEach((b) =>
+          b.addEventListener("click", async (ev) => {
+            const id = ev.currentTarget.getAttribute("data-id");
+            const snap = await fetch(
+              `${API_BASE}/process-snapshots/${id}/`
+            ).then((r) => r.json());
+            document.getElementById(
+              "snapshotDetail"
+            ).innerHTML = `<pre style="white-space:pre-wrap">${JSON.stringify(
+              snap,
+              null,
+              2
+            )}</pre>`;
+          })
+        );
+      });
+
+      (async function () {
+        await loadHosts();
+        const params = new URLSearchParams(location.search);
+        const qh = params.get("hostname");
+        if (qh) document.getElementById("hostSel").value = qh;
+      })();
+    </script>
+  </body>
+</html>

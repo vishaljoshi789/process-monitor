@@ -1,0 +1,5 @@
+{
+  "api_url": "http://127.0.0.1:8000/api/process-snapshots/",
+  "api_key": "873e26cb5f1ff92c3993dbc814fbc1d4decb36dd1b1f1281",
+  "timeout_seconds": 10
+}

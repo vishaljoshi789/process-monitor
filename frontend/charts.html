@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Charts — Process Monitor</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <link rel="stylesheet" href="styles.css" />
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  </head>
+  <body>
+    <div style="padding: 18px; max-width: 1100px; margin: 0 auto">
+      <h2>Charts</h2>
+      <div
+        style="
+          display: flex;
+          gap: 12px;
+          align-items: center;
+          margin-bottom: 12px;
+        "
+      >
+        <select id="hostSel" class="select"></select>
+        <select id="limitSel" class="select">
+          <option value="25">Last 25</option>
+          <option value="50">50</option>
+          <option value="100">100</option>
+        </select>
+        <button id="loadBtn" class="small-btn">Load</button>
+        <button
+          id="backBtn"
+          class="small-btn ghost"
+          onclick="location.href='index.html'"
+        >
+          Back
+        </button>
+      </div>
+
+      <div class="card">
+        <h3>RAM Used (GB)</h3>
+        <canvas id="ramChart"></canvas>
+        <h3 style="margin-top: 18px">Total CPU (%)</h3>
+        <canvas id="cpuChart"></canvas>
+        <h3 style="margin-top: 18px">Top 8 Processes (memory)</h3>
+        <canvas id="topProc"></canvas>
+      </div>
+    </div>
+
+    <script>
+      const API_BASE = "http://127.0.0.1:8000/api";
+      let hosts = [];
+      let ramChart, cpuChart, topChart;
+
+      async function loadHosts() {
+        try {
+          hosts = await fetch(`${API_BASE}/hosts/`).then((r) => r.json());
+          const sel = document.getElementById("hostSel");
+          sel.innerHTML = hosts
+            .map((h) => `<option value="${h}">${h}</option>`)
+            .join("");
+        } catch (e) {
+          console.error(e);
+        }
+      }
+
+      function initCharts() {
+        if (!ramChart)
+          ramChart = new Chart(document.getElementById("ramChart"), {
+            type: "line",
+            data: {
+              labels: [],
+              datasets: [{ label: "RAM used (GB)", data: [], tension: 0.25 }],
+            },
+            options: { animation: false },
+          });
+        if (!cpuChart)
+          cpuChart = new Chart(document.getElementById("cpuChart"), {
+            type: "line",
+            data: {
+              labels: [],
+              datasets: [{ label: "Total CPU (%)", data: [], tension: 0.25 }],
+            },
+            options: { animation: false },
+          });
+        if (!topChart)
+          topChart = new Chart(document.getElementById("topProc"), {
+            type: "bar",
+            data: { labels: [], datasets: [{ label: "Memory MB", data: [] }] },
+            options: { indexAxis: "y", animation: false },
+          });
+      }
+
+      async function loadSeries() {
+        const host = document.getElementById("hostSel").value;
+        const limit = document.getElementById("limitSel").value;
+        if (!host) return alert("pick host");
+        const items = await fetch(
+          `${API_BASE}/process-snapshots/series/?hostname=${encodeURIComponent(
+            host
+          )}&limit=${limit}`
+        ).then((r) => r.json());
+        const labels = items.map((i) =>
+          new Date(i.captured_at).toLocaleString()
+        );
+        const ram = items.map((i) => i.ram_used_gb || null);
+        const cpu = items.map(
+          (i) => Math.round((i.total_cpu_percent || 0) * 10) / 10
+        );
+        ramChart.data.labels = labels;
+        ramChart.data.datasets[0].data = ram;
+        ramChart.update();
+        cpuChart.data.labels = labels;
+        cpuChart.data.datasets[0].data = cpu;
+        cpuChart.update();
+        const snap = await fetch(
+          `${API_BASE}/process-snapshots/latest/?hostname=${encodeURIComponent(
+            host
+          )}`
+        ).then((r) => r.json());
+        const top = (snap.processes || [])
+          .slice()
+          .sort((a, b) => (b.memory_rss || 0) - (a.memory_rss || 0))
+          .slice(0, 8);
+        topChart.data.labels = top.map((p) => `${p.name} (${p.pid})`);
+        topChart.data.datasets[0].data = top.map((p) =>
+          Math.round((p.memory_rss || 0) / 1024 / 1024)
+        );
+        topChart.update();
+      }
+      document.getElementById("loadBtn").addEventListener("click", loadSeries);
+
+      (async function init() {
+        await loadHosts();
+        initCharts();
+        const params = new URLSearchParams(location.search);
+        const qh = params.get("hostname");
+        if (qh) document.getElementById("hostSel").value = qh;
+        await loadSeries();
+      })();
+    </script>
+  </body>
+</html>

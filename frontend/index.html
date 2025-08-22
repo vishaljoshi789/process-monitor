@@ -1,0 +1,487 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Process Monitor — Dashboard</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <link rel="stylesheet" href="style.css" />
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+      .toggle-btn {
+        cursor: pointer;
+        background: none;
+        border: none;
+        font-size: 14px;
+        color: white;
+      }
+      .child-row.hidden {
+        display: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="app">
+      <aside class="sidebar">
+        <div class="brand">Process Monitor</div>
+        <div class="hosts card" id="hostsList">Loading hosts…</div>
+
+        <div class="controls">
+          <a id="openCharts" href="#" target="_blank">Open Charts (full)</a>
+          <a id="openHistory" href="#" target="_blank">Open History (full)</a>
+        </div>
+      </aside>
+
+      <main class="main">
+        <div class="header">
+          <h1 id="pageTitle">Select a host</h1>
+          <div class="selectors"></div>
+        </div>
+
+        <div class="content">
+          <div>
+            <div class="card">
+              <div class="tabs" role="tablist" aria-label="Main tabs">
+                <div class="tab active" id="tab-system" data-tab="system">
+                  System Details
+                </div>
+                <div class="tab" id="tab-processes" data-tab="processes">
+                  Processes
+                </div>
+                <div class="tab" id="tab-charts" data-tab="charts">Charts</div>
+              </div>
+
+              <div id="tabContent">
+                <div id="systemPane">
+                  <div class="meta">
+                    <div>Host: <strong id="metaHost">—</strong></div>
+                    <div>Captured at: <strong id="metaTime">—</strong></div>
+                    <div>
+                      Total processes: <strong id="metaCount">—</strong>
+                    </div>
+                  </div>
+                  <div id="systemDetails" class="sys-grid"></div>
+                </div>
+
+                <div id="processPane" style="display: none">
+                  <div class="meta">
+                    <div>Processes snapshot</div>
+                  </div>
+                  <input
+                    type="text"
+                    id="processSearch"
+                    class="search-input"
+                    placeholder="Search processes..."
+                    style="margin-bottom: 8px; width: 100%; max-width: 320px"
+                  />
+                  <div style="overflow: auto; max-height: 70vh">
+                    <table class="table" id="processTable">
+                      <thead>
+                        <tr>
+                          <th></th>
+                          <th>Name</th>
+                          <th>Memory (MB)</th>
+                          <th>CPU (%)</th>
+                          <th>PPID</th>
+                        </tr>
+                      </thead>
+                      <tbody id="processTableBody">
+                        <tr>
+                          <td colspan="5" class="center muted">No data</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                <div id="chartsPane" style="display: none">
+                  <div class="meta"><div>Charts</div></div>
+                  <canvas id="miniRamChart"></canvas>
+                  <canvas id="miniCpuChart" style="margin-top: 8px"></canvas>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </main>
+    </div>
+
+    <script>
+      const API_BASE = "http://127.0.0.1:8000/api";
+      const WS_PREFIX =
+        (location.protocol === "https:" ? "wss://" : "ws://") +
+        location.host +
+        "/ws/hosts/";
+      const SERIES_LIMIT = 40;
+
+      const hostsListEl = document.getElementById("hostsList");
+      const pageTitle = document.getElementById("pageTitle");
+      const openCharts = document.getElementById("openCharts");
+      const openHistory = document.getElementById("openHistory");
+      const metaHost = document.getElementById("metaHost");
+      const metaTime = document.getElementById("metaTime");
+      const metaCount = document.getElementById("metaCount");
+      const systemDetailsEl = document.getElementById("systemDetails");
+      const processTableBody = document.getElementById("processTableBody");
+      const processSearch = document.getElementById("processSearch");
+      const wsStatus = document.getElementById("wsStatus");
+      const tabs = {
+        system: document.getElementById("tab-system"),
+        processes: document.getElementById("tab-processes"),
+        charts: document.getElementById("tab-charts"),
+      };
+      const panes = {
+        system: document.getElementById("systemPane"),
+        processes: document.getElementById("processPane"),
+        charts: document.getElementById("chartsPane"),
+      };
+      let hosts = [];
+      let currentHost = null;
+      let latestSnapshot = null;
+      let ws = null;
+      let miniRamChart = null,
+        miniCpuChart = null;
+      function initMiniCharts() {
+        if (miniRamChart) return;
+        miniRamChart = new Chart(document.getElementById("miniRamChart"), {
+          type: "line",
+          data: {
+            labels: [],
+            datasets: [{ label: "RAM used (GB)", data: [], tension: 0.25 }],
+          },
+          options: { animation: false, plugins: { legend: { display: true } } },
+        });
+        miniCpuChart = new Chart(document.getElementById("miniCpuChart"), {
+          type: "line",
+          data: {
+            labels: [],
+            datasets: [{ label: "Total CPU (%)", data: [], tension: 0.25 }],
+          },
+          options: { animation: false, plugins: { legend: { display: true } } },
+        });
+      }
+      function setActiveTab(tabName) {
+        Object.keys(tabs).forEach((k) =>
+          tabs[k].classList.toggle("active", k === tabName)
+        );
+        Object.keys(panes).forEach(
+          (k) => (panes[k].style.display = k === tabName ? "block" : "none")
+        );
+        if (currentHost) fetchTabData(tabName, currentHost);
+      }
+      async function fetchJSON(url) {
+        const r = await fetch(url);
+        if (!r.ok) throw new Error(await r.text());
+        return r.json();
+      }
+      async function loadHosts() {
+        try {
+          hostsListEl.innerHTML = "Loading hosts…";
+          hosts = await fetchJSON(`${API_BASE}/hosts/`);
+          if (!hosts || hosts.length === 0) {
+            hostsListEl.innerHTML = '<div class="muted">No hosts found</div>';
+            return;
+          }
+          hostsListEl.innerHTML = "";
+          for (const h of hosts) {
+            const el = document.createElement("div");
+            el.className = "host-item";
+            el.textContent = h;
+            el.onclick = () => selectHost(h, el);
+            hostsListEl.appendChild(el);
+          }
+          selectHost(hosts[0], hostsListEl.firstChild);
+        } catch (e) {
+          hostsListEl.innerHTML = `<div class="muted">Error loading hosts</div>`;
+          console.error(e);
+        }
+      }
+      function selectHost(host, element) {
+        Array.from(hostsListEl.children).forEach((c) =>
+          c.classList.toggle("active", c === element)
+        );
+        currentHost = host;
+        pageTitle.textContent = `Host: ${host}`;
+        openWS(host);
+        setActiveTab("system");
+        openCharts.href = `charts.html?hostname=${encodeURIComponent(host)}`;
+        openHistory.href = `history.html?hostname=${encodeURIComponent(host)}`;
+      }
+      async function fetchTabData(tabName, host) {
+        try {
+          if (tabName === "system") {
+            const snap = await fetchJSON(
+              `${API_BASE}/process-snapshots/latest/?hostname=${encodeURIComponent(
+                host
+              )}`
+            );
+            renderSystem(snap);
+          } else if (tabName === "processes") {
+            const snap = await fetchJSON(
+              `${API_BASE}/process-snapshots/latest/?hostname=${encodeURIComponent(
+                host
+              )}`
+            );
+            renderProcesses(snap);
+          } else if (tabName === "charts") {
+            const series = await fetchJSON(
+              `${API_BASE}/process-snapshots/series/?hostname=${encodeURIComponent(
+                host
+              )}&limit=${SERIES_LIMIT}`
+            );
+            renderSeries(series);
+          }
+        } catch (e) {
+          console.error("tab fetch error", e);
+        }
+      }
+      function renderSystem(snap) {
+        latestSnapshot = snap;
+        metaHost.textContent = snap.hostname;
+        metaTime.textContent = new Date(snap.captured_at).toLocaleString();
+        metaCount.textContent = (snap.processes || []).length;
+        const sd = snap.system_details || {};
+        const rows = [
+          ["Operating System", sd.operating_system || "-"],
+          ["Processor", sd.processor || "-"],
+          ["Number of Cores", sd.number_of_cores || "-"],
+          ["Number of Threads", sd.number_of_threads || "-"],
+          ["RAM (GB)", sd.ram_total_gb || "-"],
+          ["Used RAM (GB)", sd.ram_used_gb || "-"],
+        ];
+        systemDetailsEl.innerHTML = rows
+          .map(
+            (r) =>
+              `<div class="sys-row"><div>${r[0]}</div><div class="muted">${r[1]}</div></div>`
+          )
+          .join("");
+        appendLatestToMiniCharts(snap);
+      }
+      function renderProcesses(snap) {
+        latestSnapshot = snap;
+        metaHost.textContent = snap.hostname;
+        metaTime.textContent = new Date(snap.captured_at).toLocaleString();
+        metaCount.textContent = (snap.processes || []).length;
+        const procMap = {};
+        (snap.processes || []).forEach((p) => {
+          procMap[p.pid] = { ...p, children: [] };
+        });
+        (snap.processes || []).forEach((p) => {
+          if (p.ppid && procMap[p.ppid]) {
+            procMap[p.ppid].children.push(procMap[p.pid]);
+          }
+        });
+        const roots = Object.values(procMap).filter(
+          (p) => !p.ppid || !procMap[p.ppid]
+        );
+        function renderRow(p, level = 0) {
+          const memMB = Math.round((p.memory_rss || 0) / 1024 / 1024);
+          const hasChildren = p.children && p.children.length > 0;
+          const rowId = "row-" + p.pid;
+          let rowHtml = `
+            <tr id="${rowId}" class="process-row" data-pid="${p.pid}">
+              <td>
+                ${
+                  hasChildren
+                    ? `<button class="toggle-btn" onclick="toggleSub(${p.pid})">▶</button>`
+                    : ""
+                }
+              </td>
+              <td>
+                <div style="padding-left:${level * 16}px">
+                  <strong>${escapeHtml(p.name)}</strong>
+                  <div class="muted" style="font-size:12px">PID ${p.pid}</div>
+                </div>
+              </td>
+              <td>${memMB}</td>
+              <td>${(p.cpu_percent || 0).toFixed(1)}</td>
+              <td class="muted">${p.ppid || "-"}</td>
+            </tr>`;
+
+          if (hasChildren) {
+            rowHtml += p.children
+              .map((c) => renderChildRow(c, p.pid, level + 1))
+              .join("");
+          }
+          return rowHtml;
+        }
+        function renderChildRow(p, parentPid, level) {
+          let html = `<tr class="child-row hidden child-of-${parentPid}" data-pid="${p.pid}">`;
+          const memMB = Math.round((p.memory_rss || 0) / 1024 / 1024);
+          const hasChildren = p.children && p.children.length > 0;
+          const rowId = "row-" + p.pid;
+          html += `
+              <td>
+                ${
+                  hasChildren
+                    ? `<button class="toggle-btn" onclick="toggleSub(${p.pid})">▶</button>`
+                    : ""
+                }
+              </td>
+              <td>
+                <div style="padding-left:${level * 16}px">
+                  <strong>${escapeHtml(p.name)}</strong>
+                  <div class="muted" style="font-size:12px">PID ${p.pid}</div>
+                </div>
+              </td>
+              <td>${memMB}</td>
+              <td>${(p.cpu_percent || 0).toFixed(1)}</td>
+              <td class="muted">${p.ppid || "-"}</td>
+            </tr>`;
+          if (hasChildren) {
+            html += p.children
+              .map((c) => renderChildRow(c, p.pid, level + 1))
+              .join("");
+          }
+          return html;
+        }
+        const rows = roots.map((p) => renderRow(p)).join("");
+        processTableBody.innerHTML =
+          rows ||
+          `<tr><td colspan="5" class="muted center">No processes</td></tr>`;
+      }
+      function toggleSub(pid) {
+        const btn = document.querySelector(`#row-${pid} .toggle-btn`);
+        const children = document.querySelectorAll(`.child-of-${pid}`);
+        const isHidden =
+          children[0] && children[0].classList.contains("hidden");
+
+        children.forEach((row) => {
+          if (isHidden) {
+            row.classList.remove("hidden");
+          } else {
+            row.classList.add("hidden");
+          }
+        });
+        btn.textContent = isHidden ? "▼" : "▶";
+      }
+      function renderSeries(series) {
+        initMiniCharts();
+        const labels = (series || []).map((i) =>
+          new Date(i.captured_at).toLocaleTimeString()
+        );
+        const ram = (series || []).map((i) => i.ram_used_gb || null);
+        const cpu = (series || []).map(
+          (i) => Math.round((i.total_cpu_percent || 0) * 10) / 10
+        );
+        miniRamChart.data.labels = labels;
+        miniRamChart.data.datasets[0].data = ram;
+        miniRamChart.update();
+        miniCpuChart.data.labels = labels;
+        miniCpuChart.data.datasets[0].data = cpu;
+        miniCpuChart.update();
+      }
+      function appendLatestToMiniCharts(snap) {
+        initMiniCharts();
+        if (!snap) return;
+        const label = new Date(snap.captured_at).toLocaleTimeString();
+        const ram = snap.system_details
+          ? snap.system_details.ram_used_gb
+          : null;
+        const totalCpu = (snap.processes || []).reduce(
+          (acc, p) => acc + (p.cpu_percent || 0),
+          0
+        );
+        miniRamChart.data.labels.push(label);
+        miniRamChart.data.datasets[0].data.push(ram);
+        miniCpuChart.data.labels.push(label);
+        miniCpuChart.data.datasets[0].data.push(Math.round(totalCpu * 10) / 10);
+        if (miniRamChart.data.labels.length > SERIES_LIMIT) {
+          miniRamChart.data.labels.shift();
+          miniRamChart.data.datasets[0].data.shift();
+          miniCpuChart.data.labels.shift();
+          miniCpuChart.data.datasets[0].data.shift();
+        }
+        miniRamChart.update();
+        miniCpuChart.update();
+      }
+      function openWS(host) {
+        closeWS();
+        if (!host) return;
+        const url = WS_PREFIX + encodeURIComponent(host) + "/";
+        try {
+          ws = new WebSocket(url);
+          ws.onopen = () => {
+            wsStatus.textContent = "connected";
+          };
+          ws.onmessage = (ev) => {
+            try {
+              const data = JSON.parse(ev.data);
+              renderSystem(data);
+              if (document.querySelector(".tab.active") === tabs.processes)
+                renderProcesses(data);
+            } catch (e) {
+              console.error("WS parsing error", e);
+            }
+          };
+          ws.onclose = () => {
+            wsStatus.textContent = "disconnected";
+            setTimeout(() => openWS(currentHost), 1000);
+          };
+          ws.onerror = (e) => {
+            console.error("WS err", e);
+            ws.close();
+          };
+        } catch (e) {
+          console.error(e);
+          wsStatus.textContent = "error";
+        }
+      }
+      function closeWS() {
+        try {
+          if (ws) {
+            ws.onopen = ws.onmessage = ws.onerror = ws.onclose = null;
+            ws.close();
+          }
+        } catch (e) {}
+        ws = null;
+      }
+      function escapeHtml(s) {
+        if (!s) return "";
+        return String(s).replace(
+          /[&<>"']/g,
+          (ch) =>
+            ({
+              "&": "&amp;",
+              "<": "&lt;",
+              ">": "&gt;",
+              '"': "&quot;",
+              "'": "&#39;",
+            }[ch])
+        );
+      }
+      Object.keys(tabs).forEach((k) =>
+        tabs[k].addEventListener("click", () => setActiveTab(k))
+      );
+      if (processSearch) {
+        processSearch.addEventListener("input", function () {
+          const search = processSearch.value.trim().toLowerCase();
+          if (!search) {
+            Array.from(processTableBody.querySelectorAll("tr")).forEach(
+              (row) => {
+                row.style.display = "";
+              }
+            );
+            return;
+          }
+          Array.from(processTableBody.querySelectorAll("tr")).forEach((row) => {
+            const nameCell = row.querySelector("td:nth-child(2) strong");
+            if (nameCell) {
+              const name = nameCell.textContent.toLowerCase();
+              if (name.includes(search)) {
+                row.style.display = "";
+              } else {
+                row.style.display = "none";
+              }
+            } else {
+              row.style.display = "none";
+            }
+          });
+        });
+      }
+      (async function () {
+        initMiniCharts();
+        await loadHosts();
+      })();
+    </script>
+  </body>
+</html>

@@ -1,0 +1,3 @@
+([('agent',
+   '/Users/vishaljoshi/Projects/cyethack/agent/dist/agent',
+   'EXECUTABLE')],)
